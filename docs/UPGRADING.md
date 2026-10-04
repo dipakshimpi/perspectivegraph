@@ -16,6 +16,18 @@ the upgrade recipe in
 digest, take the backup, stage it.
 
 ---
+## 1.32.0
+
+### Helm values are now validated strictly
+
+The Helm chart now validates values against a schema. Unknown or misspelled
+keys that were previously ignored will now cause Helm validation to fail.
+
+What to do: review custom values files for unsupported or misspelled keys
+before upgrading. In particular, check any values that are not part of the
+chart's documented `values.yaml`.
+
+---
 
 ## 1.31.0
 
