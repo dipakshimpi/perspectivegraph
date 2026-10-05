@@ -295,3 +295,56 @@ func TestAnECSServiceIsNotFixedWithANetworkPolicy(t *testing.T) {
 		t.Errorf("a Kubernetes pod behind a load balancer: got %v, want the NetworkPolicy", pod)
 	}
 }
+
+func TestGenerateRemediationForInternetExposedLambda(t *testing.T) {
+	p := analyzer.AttackPath{
+		Nodes: []ontology.Node{
+			{
+				ID:    "lambda",
+				Label: ontology.LabelFunction,
+				Name:  "public-handler",
+				Properties: map[string]any{
+					ontology.PropInternetExposed: true,
+				},
+			},
+			{
+				ID:    "role",
+				Label: ontology.LabelIAMRole,
+				Name:  "lambda-execution-role",
+			},
+		},
+		Steps: []analyzer.Step{
+			{
+				EdgeType: ontology.EdgeAssumes,
+				From:     "lambda",
+				To:       "role",
+			},
+		},
+	}
+
+	var found *Suggestion
+
+	for _, s := range Generate(p) {
+		if strings.Contains(s.Filename, "lambda") {
+			s := s
+			found = &s
+			break
+		}
+	}
+
+	if found == nil {
+		t.Fatalf("expected remediation for internet-exposed Lambda, got %+v", Generate(p))
+	}
+
+	if found.Kind != "terraform" {
+		t.Errorf("kind = %q, want terraform", found.Kind)
+	}
+
+	if found.Cut != (CutEdge{
+		From: "lambda",
+		To:   "role",
+		Type: string(ontology.EdgeAssumes),
+	}) {
+		t.Errorf("cut = %+v, want Lambda -> role ASSUMES", found.Cut)
+	}
+}

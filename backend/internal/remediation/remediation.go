@@ -125,6 +125,21 @@ var Registry = []Rule{
 		},
 		Build: func(from, to ontology.Node) Suggestion { return networkSegment(from, to) },
 	},
+	{
+		// An internet-exposed Lambda can be invoked by anyone and then use
+		// its execution role. Cut the Lambda -> role assumption edge by
+		// removing the public invocation path.
+		Name: "close-public-lambda",
+		Match: func(st analyzer.Step, from, to ontology.Node) bool {
+			return st.EdgeType == ontology.EdgeAssumes &&
+				from.Label == ontology.LabelFunction &&
+				from.InternetExposed() &&
+				to.Label == ontology.LabelIAMRole
+		},
+		Build: func(from, to ontology.Node) Suggestion {
+			return closePublicLambda(from, to)
+		},
+	},
 }
 
 // Generate inspects a path and emits remediation artifacts for the edges that
@@ -355,6 +370,41 @@ resource "aws_s3_bucket_public_access_block" "perspective_block_public_%s" {
 		Content:   content,
 		Rationale: "The sensitive bucket is open to anyone, so no edge stands in the way; blocking public access closes it.",
 	}, true
+}
+
+// closePublicLambda generates Terraform that removes public invocation paths
+// from an internet-exposed Lambda function.
+func closePublicLambda(lambda, role ontology.Node) Suggestion {
+	name := sanitize(lambda.Name)
+
+	content := fmt.Sprintf(`# PerspectiveGraph auto-remediation - Lambda %q is publicly invokable.
+# Remove the public invocation path before relying on its execution role.
+# Review the existing Lambda URL and function policy resources and make sure
+# they do not allow unauthenticated invocation.
+
+# If this Lambda uses a Function URL, make it authenticated:
+resource "aws_lambda_function_url_config" "perspective_%s" {
+  function_name      = %q
+  authorization_type = "AWS_IAM"
+}
+
+# If the function has a public Lambda permission, remove that permission.
+# The existing aws_lambda_permission resource with principal = "*"
+# must be deleted or changed so that anonymous callers cannot invoke it.
+`, name, name, lambda.Name)
+
+	return Suggestion{
+		Title:     "Close public access to Lambda " + lambda.Name,
+		Kind:      "terraform",
+		Filename:  "close-public-lambda-" + name + ".tf",
+		Content:   content,
+		Rationale: "Cuts the ASSUMES edge from the internet-exposed Lambda by removing unauthenticated invocation paths before the function can use its execution role.",
+		Cut: CutEdge{
+			From: lambda.ID,
+			To:   role.ID,
+			Type: string(ontology.EdgeAssumes),
+		},
+	}
 }
 
 func networkPolicy(c ontology.Node) Suggestion {
