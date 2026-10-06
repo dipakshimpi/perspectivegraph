@@ -372,33 +372,65 @@ resource "aws_s3_bucket_public_access_block" "perspective_block_public_%s" {
 	}, true
 }
 
-// closePublicLambda generates Terraform that removes public invocation paths
-// from an internet-exposed Lambda function.
 func closePublicLambda(lambda, role ontology.Node) Suggestion {
 	name := sanitize(lambda.Name)
+	exposure := propStr(lambda, "exposure")
 
-	content := fmt.Sprintf(`# PerspectiveGraph auto-remediation - Lambda %q is publicly invokable.
-# Remove the public invocation path before relying on its execution role.
-# Review the existing Lambda URL and function policy resources and make sure
-# they do not allow unauthenticated invocation.
+	var content string
 
-# If this Lambda uses a Function URL, make it authenticated:
-resource "aws_lambda_function_url_config" "perspective_%s" {
-  function_name      = %q
-  authorization_type = "AWS_IAM"
-}
+	switch exposure {
+	case "function URL without authentication":
+		content = fmt.Sprintf(`# PerspectiveGraph auto-remediation - Lambda %q is publicly invokable.
+# The verification proves the public entry point is gone; it does not change
+# the permissions granted by the Lambda execution role.
 
-# If the function has a public Lambda permission, remove that permission.
-# The existing aws_lambda_permission resource with principal = "*"
-# must be deleted or changed so that anonymous callers cannot invoke it.
-`, name, name, lambda.Name)
+# This function uses an unauthenticated Lambda Function URL.
+# Update the EXISTING aws_lambda_function_url resource for this function:
+#
+#   authorization_type = "AWS_IAM"
+#
+# Do not create a second aws_lambda_function_url resource.
+
+# When authorization_type was "NONE", remove the public Lambda permissions
+# explicitly as well. These permissions may have been added automatically
+# and are not removed simply by changing or destroying the Function URL.
+#
+# Remove permissions that grant:
+#   lambda:InvokeFunctionUrl
+#   lambda:InvokeFunction
+# to:
+#   principal = "*"
+#
+# For example:
+#
+#   aws lambda remove-permission --function-name %q --statement-id <STATEMENT_ID>
+`, lambda.Name, lambda.Name)
+
+	case "function policy lets any AWS principal invoke it":
+		content = fmt.Sprintf(`# PerspectiveGraph auto-remediation - Lambda %q is publicly invokable.
+# The verification proves the public entry point is gone; it does not change
+# the permissions granted by the Lambda execution role.
+
+# This function policy allows any AWS principal to invoke the function.
+# Update the EXISTING aws_lambda_permission resource(s).
+#
+# Replace:
+#
+#   principal = "*"
+#
+# with the AWS account or service that actually needs to invoke this function.
+# Where appropriate, also restrict access with source_arn and/or source_account.
+#
+# Do not create a new permission resource that preserves public access.
+`, lambda.Name)
+	}
 
 	return Suggestion{
 		Title:     "Close public access to Lambda " + lambda.Name,
 		Kind:      "terraform",
 		Filename:  "close-public-lambda-" + name + ".tf",
 		Content:   content,
-		Rationale: "Cuts the ASSUMES edge from the internet-exposed Lambda by removing unauthenticated invocation paths before the function can use its execution role.",
+		Rationale: "Removes the public Lambda entry point so the internet can no longer reach the function through this path. The verification proves the route is gone, not that the execution role's permissions changed.",
 		Cut: CutEdge{
 			From: lambda.ID,
 			To:   role.ID,
