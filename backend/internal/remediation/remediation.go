@@ -125,6 +125,21 @@ var Registry = []Rule{
 		},
 		Build: func(from, to ontology.Node) Suggestion { return networkSegment(from, to) },
 	},
+	{
+		// An internet-exposed Lambda can be invoked by anyone and then use
+		// its execution role. Cut the Lambda -> role assumption edge by
+		// removing the public invocation path.
+		Name: "close-public-lambda",
+		Match: func(st analyzer.Step, from, to ontology.Node) bool {
+			return st.EdgeType == ontology.EdgeAssumes &&
+				from.Label == ontology.LabelFunction &&
+				from.InternetExposed() &&
+				to.Label == ontology.LabelIAMRole
+		},
+		Build: func(from, to ontology.Node) Suggestion {
+			return closePublicLambda(from, to)
+		},
+	},
 }
 
 // Generate inspects a path and emits remediation artifacts for the edges that
@@ -355,6 +370,73 @@ resource "aws_s3_bucket_public_access_block" "perspective_block_public_%s" {
 		Content:   content,
 		Rationale: "The sensitive bucket is open to anyone, so no edge stands in the way; blocking public access closes it.",
 	}, true
+}
+
+func closePublicLambda(lambda, role ontology.Node) Suggestion {
+	name := sanitize(lambda.Name)
+	exposure := propStr(lambda, "exposure")
+
+	var content string
+
+	switch exposure {
+	case "function URL without authentication":
+		content = fmt.Sprintf(`# PerspectiveGraph auto-remediation - Lambda %q is publicly invokable.
+# The verification proves the public entry point is gone; it does not change
+# the permissions granted by the Lambda execution role.
+
+# This function uses an unauthenticated Lambda Function URL.
+# Update the EXISTING aws_lambda_function_url resource for this function:
+#
+#   authorization_type = "AWS_IAM"
+#
+# Do not create a second aws_lambda_function_url resource.
+
+# When authorization_type was "NONE", remove the public Lambda permissions
+# explicitly as well. These permissions may have been added automatically
+# and are not removed simply by changing or destroying the Function URL.
+#
+# Remove permissions that grant:
+#   lambda:InvokeFunctionUrl
+#   lambda:InvokeFunction
+# to:
+#   principal = "*"
+#
+# For example:
+#
+#   aws lambda remove-permission --function-name %q --statement-id <STATEMENT_ID>
+`, lambda.Name, lambda.Name)
+
+	case "function policy lets any AWS principal invoke it":
+		content = fmt.Sprintf(`# PerspectiveGraph auto-remediation - Lambda %q is publicly invokable.
+# The verification proves the public entry point is gone; it does not change
+# the permissions granted by the Lambda execution role.
+
+# This function policy allows any AWS principal to invoke the function.
+# Update the EXISTING aws_lambda_permission resource(s).
+#
+# Replace:
+#
+#   principal = "*"
+#
+# with the AWS account or service that actually needs to invoke this function.
+# Where appropriate, also restrict access with source_arn and/or source_account.
+#
+# Do not create a new permission resource that preserves public access.
+`, lambda.Name)
+	}
+
+	return Suggestion{
+		Title:     "Close public access to Lambda " + lambda.Name,
+		Kind:      "terraform",
+		Filename:  "close-public-lambda-" + name + ".tf",
+		Content:   content,
+		Rationale: "Removes the public Lambda entry point so the internet can no longer reach the function through this path. The verification proves the route is gone, not that the execution role's permissions changed.",
+		Cut: CutEdge{
+			From: lambda.ID,
+			To:   role.ID,
+			Type: string(ontology.EdgeAssumes),
+		},
+	}
 }
 
 func networkPolicy(c ontology.Node) Suggestion {

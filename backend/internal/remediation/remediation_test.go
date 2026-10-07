@@ -295,3 +295,154 @@ func TestAnECSServiceIsNotFixedWithANetworkPolicy(t *testing.T) {
 		t.Errorf("a Kubernetes pod behind a load balancer: got %v, want the NetworkPolicy", pod)
 	}
 }
+
+func TestGenerateRemediationForLambdaFunctionURLExposure(t *testing.T) {
+	p := analyzer.AttackPath{
+		Nodes: []ontology.Node{
+			{
+				ID:    "lambda",
+				Label: ontology.LabelFunction,
+				Name:  "public-handler",
+				Properties: map[string]any{
+					ontology.PropInternetExposed: true,
+					"exposure":                   "function URL without authentication",
+				},
+			},
+			{
+				ID:    "role",
+				Label: ontology.LabelIAMRole,
+				Name:  "lambda-execution-role",
+			},
+		},
+		Steps: []analyzer.Step{
+			{
+				EdgeType: ontology.EdgeAssumes,
+				From:     "lambda",
+				To:       "role",
+			},
+		},
+	}
+
+	var found *Suggestion
+	for _, s := range Generate(p) {
+		if strings.Contains(s.Filename, "lambda") {
+			s := s
+			found = &s
+			break
+		}
+	}
+
+	if found == nil {
+		t.Fatalf("expected remediation for Lambda Function URL exposure, got %+v", Generate(p))
+	}
+
+	if found.Kind != "terraform" {
+		t.Errorf("kind = %q, want terraform", found.Kind)
+	}
+
+	for _, want := range []string{
+		`aws_lambda_function_url`,
+		`authorization_type = "AWS_IAM"`,
+		`lambda:InvokeFunctionUrl`,
+		`lambda:InvokeFunction`,
+		`principal = "*"`,
+		`aws lambda remove-permission`,
+	} {
+		if !strings.Contains(found.Content, want) {
+			t.Errorf("remediation missing %q:\n%s", want, found.Content)
+		}
+	}
+
+	if found.Cut != (CutEdge{
+		From: "lambda",
+		To:   "role",
+		Type: string(ontology.EdgeAssumes),
+	}) {
+		t.Errorf("cut = %+v, want Lambda -> role ASSUMES", found.Cut)
+	}
+}
+
+func TestGenerateRemediationForLambdaPolicyExposure(t *testing.T) {
+	p := analyzer.AttackPath{
+		Nodes: []ontology.Node{
+			{
+				ID:    "lambda",
+				Label: ontology.LabelFunction,
+				Name:  "public-handler",
+				Properties: map[string]any{
+					ontology.PropInternetExposed: true,
+					"exposure":                   "function policy lets any AWS principal invoke it",
+				},
+			},
+			{
+				ID:    "role",
+				Label: ontology.LabelIAMRole,
+				Name:  "lambda-execution-role",
+			},
+		},
+		Steps: []analyzer.Step{
+			{
+				EdgeType: ontology.EdgeAssumes,
+				From:     "lambda",
+				To:       "role",
+			},
+		},
+	}
+
+	var found *Suggestion
+	for _, s := range Generate(p) {
+		if strings.Contains(s.Filename, "lambda") {
+			s := s
+			found = &s
+			break
+		}
+	}
+
+	if found == nil {
+		t.Fatalf("expected remediation for Lambda policy exposure, got %+v", Generate(p))
+	}
+
+	for _, want := range []string{
+		`aws_lambda_permission`,
+		`principal = "*"`,
+		`source_arn`,
+		`source_account`,
+	} {
+		if !strings.Contains(found.Content, want) {
+			t.Errorf("remediation missing %q:\n%s", want, found.Content)
+		}
+	}
+}
+
+func TestNoRemediationForNonExposedLambda(t *testing.T) {
+	p := analyzer.AttackPath{
+		Nodes: []ontology.Node{
+			{
+				ID:    "lambda",
+				Label: ontology.LabelFunction,
+				Name:  "private-handler",
+				Properties: map[string]any{
+					ontology.PropInternetExposed: false,
+				},
+			},
+			{
+				ID:    "role",
+				Label: ontology.LabelIAMRole,
+				Name:  "lambda-execution-role",
+			},
+		},
+		Steps: []analyzer.Step{
+			{
+				EdgeType: ontology.EdgeAssumes,
+				From:     "lambda",
+				To:       "role",
+			},
+		},
+	}
+
+	for _, s := range Generate(p) {
+		if strings.Contains(s.Filename, "lambda") {
+			t.Errorf("non-exposed Lambda received remediation: %+v", s)
+		}
+	}
+}
