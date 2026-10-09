@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.2"
           cache-dependency-path: backend/go.sum
       - run: go build ./...
       - run: go vet ./...
@@ -56,8 +56,20 @@ jobs:
       # It did exactly that - staticcheck 0.8 raised its floor to Go 1.26 and, with
       # GOTOOLCHAIN=local, the step failed to build the tool rather than the code. Bump
       # this deliberately, alongside the toolchain.
+      #
+      # 0.8.1 is built against golang.org/x/tools v0.51.0 instead of run as it ships: its
+      # own x/tools reads export data up to version 4, Go 1.27.2 writes version 5, and
+      # every package failed to import (dominikh/go-tools#1832). Go back to
+      # `go run honnef.co/go/tools/cmd/staticcheck@<version> ./...` once a release carries
+      # the newer x/tools. Both versions are pinned, and the checksum database verifies
+      # them as it does any other module.
       - name: staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+        run: |
+          tools="$(mktemp -d)"
+          (cd "$tools" && go mod init staticcheck \
+            && go get honnef.co/go/tools/cmd/staticcheck@v0.8.1 golang.org/x/tools@v0.51.0 \
+            && go build -o staticcheck honnef.co/go/tools/cmd/staticcheck)
+          "$tools/staticcheck" ./...
 
   secrets:
     name: Secret scan (gitleaks)
@@ -118,7 +130,7 @@ jobs:
           echo "::error::Postgres never became ready"; docker logs postgres; exit 1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.2"
           cache-dependency-path: backend/go.sum
       # The contract test creates the AGE extension + graph itself; just run it.
       # JetStream cannot be a service container: GitHub gives no way to pass the -js
@@ -332,7 +344,7 @@ jobs:
       # pinned one is the one on PATH rather than trusting PATH order.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.2"
           cache: false
 
       - name: Install kind v0.31.0
@@ -448,7 +460,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.2"
           cache-dependency-path: backend/go.sum
 
       # --ignore our own module: its licence is this repository's (LICENSE lives at the
