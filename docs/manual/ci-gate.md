@@ -291,20 +291,22 @@ Follow the [onboarding runbook](onboarding.md) - per-source `curl`/CI
 snippets, the identifier-correlation helper, and a "no paths?" troubleshooting
 guide.
 
-
 ### GitLab CI
 
-You can include the GitLab merge-request gate template in your project's `.gitlab-ci.yml`:
+You can include the GitLab merge-request gate template in your project's `.gitlab-ci.yml`.
+GitLab includes another project's files only from the same GitLab instance, and this
+repository is on GitHub, so the template is included by URL, pinned to a release:
 
 ```yaml
 include:
-  - project: 'luiacuaniello/perspectivegraph'
-    ref: main
-    file: '/ci/gitlab/perspectivegraph-gate.yml'
+  - remote: 'https://raw.githubusercontent.com/luiacuaniello/perspectivegraph/vX.Y.Z/ci/gitlab/perspectivegraph-gate.yml'
+
+variables:
+  PERSPECTIVEGRAPH_VERSION: "X.Y.Z"
 ```
 
-Set `PERSPECTIVEGRAPH_VERSION` to a released PerspectiveGraph version. In server mode, configure `PERSPECTIVEGRAPH_API`, `PERSPECTIVEGRAPH_INGEST`, `PERSPECTIVEGRAPH_TOKEN`, and `PERSPECTIVEGRAPH_HMAC_SECRET` as appropriate for your deployment. Store credentials as masked GitLab CI/CD variables and protect them according to your pipeline's security requirements.
+Use the same release for the template and for `PERSPECTIVEGRAPH_VERSION`, the gate binary it downloads. In server mode, configure `PERSPECTIVEGRAPH_API`, `PERSPECTIVEGRAPH_INGEST`, `PERSPECTIVEGRAPH_TOKEN`, and `PERSPECTIVEGRAPH_HMAC_SECRET` as appropriate for your deployment. Store credentials as masked GitLab CI/CD variables and protect them according to your pipeline's security requirements.
 
 The template runs on merge-request pipelines. Server mode queries a deployed engine; local mode evaluates the supplied estate or reads AWS using the configured region and role. Unknown verdicts fail by default; enable `PERSPECTIVEGRAPH_ALLOW_UNKNOWN` only during a deliberate rollout.
 
-For production use, pin the included template to a reviewed release or commit rather than tracking `main`.
+A URL pinned to a tag keeps the template from changing under your pipelines: move it when you upgrade, together with `PERSPECTIVEGRAPH_VERSION`.
