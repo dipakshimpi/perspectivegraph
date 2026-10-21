@@ -1,6 +1,7 @@
+
 # PerspectiveGraph merge-request security gate.
 #
-# Include this file from .gitlab-ci.yml. Configure the server credentials or
+# Include this file from .gitlab-ci.yml. Configure server credentials or
 # local estate inputs as appropriate for your project.
 #
 # PERSPECTIVEGRAPH_VERSION must be pinned to a released version that publishes
@@ -28,8 +29,14 @@ perspectivegraph:gate:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - when: never
+
   before_script:
-    - apk add --no-cache bash ca-certificates coreutils curl jq tar cosign
+    - |
+      if ! apk add --no-cache bash ca-certificates coreutils curl tar cosign; then
+        echo "ERROR: Failed to install required pipeline dependencies." >&2
+        exit 3
+      fi
+
   script:
     - |
       bash <<'BASH'
@@ -69,7 +76,25 @@ perspectivegraph:gate:
           ;;
       esac
 
+      # Preserve project-relative paths before changing into the temp directory.
+      project_dir="$PWD"
+
+      if [ -n "$PERSPECTIVEGRAPH_ESTATE" ]; then
+        case "$PERSPECTIVEGRAPH_ESTATE" in
+          /*) ;;
+          *) PERSPECTIVEGRAPH_ESTATE="$project_dir/$PERSPECTIVEGRAPH_ESTATE" ;;
+        esac
+      fi
+
+      if [ -n "$PERSPECTIVEGRAPH_REPORT" ]; then
+        case "$PERSPECTIVEGRAPH_REPORT" in
+          /*|-*) ;;
+          *) PERSPECTIVEGRAPH_REPORT="$project_dir/$PERSPECTIVEGRAPH_REPORT" ;;
+        esac
+      fi
+
       version="${PERSPECTIVEGRAPH_VERSION#v}"
+
       case "$(uname -m)" in
         x86_64)
           arch="amd64"
@@ -82,125 +107,153 @@ perspectivegraph:gate:
           exit 3
           ;;
       esac
+
       archive="perspectivegraph_linux_${arch}.tar.gz"
       base_url="https://github.com/luiacuaniello/perspectivegraph/releases/download/v${version}"
-      workdir="$(mktemp -d)"
+
+      workdir="$(mktemp -d)" || {
+        echo "ERROR: Could not create temporary working directory." >&2
+        exit 3
+      }
+
       trap 'rm -rf "$workdir"' EXIT
-      cd "$workdir"
+
+      cd "$workdir" || {
+        echo "ERROR: Could not enter temporary working directory." >&2
+        exit 3
+      }
 
       echo "Downloading PerspectiveGraph ${version} release assets..."
-      curl --fail --silent --show-error --location --retry 3 \
-        "$base_url/$archive" -o "$archive"
-      curl --fail --silent --show-error --location --retry 3 \
-        "$base_url/SHA256SUMS" -o SHA256SUMS
-      curl --fail --silent --show-error --location --retry 3 \
-        "$base_url/SHA256SUMS.sigstore.json" -o SHA256SUMS.sigstore.json
+
+      if ! curl --fail --silent --show-error --location --retry 3 \
+        "$base_url/$archive" -o "$archive"; then
+        echo "ERROR: Could not download the PerspectiveGraph archive." >&2
+        exit 3
+      fi
+
+      if ! curl --fail --silent --show-error --location --retry 3 \
+        "$base_url/SHA256SUMS" -o SHA256SUMS; then
+        echo "ERROR: Could not download release checksums." >&2
+        exit 3
+      fi
+
+      if ! curl --fail --silent --show-error --location --retry 3 \
+        "$base_url/SHA256SUMS.sigstore.json" -o SHA256SUMS.sigstore.json; then
+        echo "ERROR: Could not download the Sigstore bundle." >&2
+        exit 3
+      fi
 
       echo "Verifying the release checksum signature..."
-      cosign verify-blob \
+
+      if ! cosign verify-blob \
         --bundle SHA256SUMS.sigstore.json \
         --certificate-identity-regexp 'https://github.com/luiacuaniello/perspectivegraph/.*' \
         --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-        SHA256SUMS
+        SHA256SUMS; then
+        echo "ERROR: Release checksum signature verification failed." >&2
+        exit 3
+      fi
 
       echo "Verifying the binary archive checksum..."
-      grep -F "  $archive" SHA256SUMS | sha256sum -c -
 
-      tar -xzf "$archive"
-      chmod +x perspectivegraph
+      if ! grep -F "  $archive" SHA256SUMS | sha256sum -c -; then
+        echo "ERROR: Archive checksum verification failed." >&2
+        exit 3
+      fi
+
+      if ! tar -xzf "$archive" || [ ! -f perspectivegraph ]; then
+        echo "ERROR: Could not extract the PerspectiveGraph binary." >&2
+        exit 3
+      fi
+
+      if ! chmod +x perspectivegraph; then
+        echo "ERROR: Could not make the binary executable." >&2
+        exit 3
+      fi
+
       bin="$workdir/perspectivegraph"
 
-      # gate -h exits nonzero by design. Capture output and check the expected
-      # flag rather than interpreting the help command's exit code.
+      # gate -h may exit nonzero. Check that the expected flag is present.
       set +e
       timeout 30 "$bin" gate -h >"$workdir/gate-help.txt" 2>&1
-      help_rc=$?
       set -e
+
       if ! grep -q -- '-max-critical' "$workdir/gate-help.txt"; then
         echo "ERROR: This release does not expose a usable gate command." >&2
         cat "$workdir/gate-help.txt" >&2
         exit 3
       fi
 
-      args=(gate -slug "$CI_PROJECT_PATH" -sha "$CI_COMMIT_SHA"
-        -pr "$CI_MERGE_REQUEST_IID" -timeout "$PERSPECTIVEGRAPH_TIMEOUT"
-        -max-critical "$PERSPECTIVEGRAPH_MAX_CRITICAL" -json)
+      args=(
+        gate
+        -slug "$CI_PROJECT_PATH"
+        -sha "$CI_COMMIT_SHA"
+        -pr "$CI_MERGE_REQUEST_IID"
+        -timeout "$PERSPECTIVEGRAPH_TIMEOUT"
+        -max-critical "$PERSPECTIVEGRAPH_MAX_CRITICAL"
+      )
 
       if [ "$PERSPECTIVEGRAPH_ALLOW_UNKNOWN" = "true" ]; then
         args+=(-allow-unknown)
       fi
 
       if [ -n "$PERSPECTIVEGRAPH_REPORT" ]; then
-        args+=(-report "$PERSPECTIVEGRAPH_REPORT" -source "$PERSPECTIVEGRAPH_SOURCE")
+        args+=(
+          -report "$PERSPECTIVEGRAPH_REPORT"
+          -source "$PERSPECTIVEGRAPH_SOURCE"
+        )
       fi
 
       if [ "$PERSPECTIVEGRAPH_MODE" = "local" ]; then
         args+=(-local)
+
         if [ -n "$PERSPECTIVEGRAPH_ESTATE" ]; then
           args+=(-estate "$PERSPECTIVEGRAPH_ESTATE")
         fi
+
         if [ -n "$PERSPECTIVEGRAPH_AWS_REGION" ]; then
           args+=(-aws-region "$PERSPECTIVEGRAPH_AWS_REGION")
         fi
+
         if [ -n "$PERSPECTIVEGRAPH_AWS_ROLE" ]; then
           args+=(-aws-role "$PERSPECTIVEGRAPH_AWS_ROLE")
         fi
       else
         args+=(-api "$PERSPECTIVEGRAPH_API")
-        if [ -n "$PERSPECTIVEGRAPH_TOKEN" ]; then
-          args+=(-token "$PERSPECTIVEGRAPH_TOKEN")
-        fi
+
         if [ -n "$PERSPECTIVEGRAPH_INGEST" ]; then
           args+=(-ingest "$PERSPECTIVEGRAPH_INGEST")
-        fi
-        if [ -n "$PERSPECTIVEGRAPH_HMAC_SECRET" ]; then
-          args+=(-hmac-secret "$PERSPECTIVEGRAPH_HMAC_SECRET")
         fi
       fi
 
       echo "Running PerspectiveGraph gate for ${CI_PROJECT_PATH}@${CI_COMMIT_SHA} (MR !${CI_MERGE_REQUEST_IID})..."
+
       set +e
-      "$bin" "${args[@]}" >"$workdir/verdict.json" 2>&1
-      gate_rc=$?
-      set -e
 
-      cat "$workdir/verdict.json"
-
-      # Report the actual verdict from the JSON, not only the exit code:
-      # -allow-unknown changes UNKNOWN's exit code to zero.
-      if jq -e --arg maxCritical "$PERSPECTIVEGRAPH_MAX_CRITICAL" '
-        (.analysed == false) or
-        (((.incomplete // "") != "") and ((.criticalPaths // 0) <= ($maxCritical | tonumber)))
-      ' "$workdir/verdict.json" >/dev/null 2>&1; then
-        verdict="UNKNOWN"
-      elif [ "$gate_rc" -eq 1 ]; then
-        verdict="BLOCKED"
-      elif [ "$gate_rc" -eq 2 ]; then
-        verdict="UNKNOWN"
-      elif [ "$gate_rc" -eq 0 ]; then
-        verdict="CLEAN"
+      if [ "$PERSPECTIVEGRAPH_MODE" = "server" ]; then
+        API_TOKEN="$PERSPECTIVEGRAPH_TOKEN" \
+        INGEST_HMAC_SECRET="$PERSPECTIVEGRAPH_HMAC_SECRET" \
+          "$bin" "${args[@]}"
       else
-        verdict="ERROR"
+        "$bin" "${args[@]}"
       fi
 
-      echo "PerspectiveGraph verdict: $verdict (exit code: $gate_rc)"
+      gate_rc=$?
+      set -e
 
       case "$gate_rc" in
         0)
           exit 0
           ;;
         1)
-          echo "Critical attack path threshold exceeded." >&2
           exit 1
           ;;
         2)
-          echo "UNKNOWN: analysis was incomplete; failing closed by default." >&2
           exit 2
           ;;
         *)
-          echo "Gate execution failed." >&2
+          echo "Gate execution failed (exit code: $gate_rc)." >&2
           exit 3
           ;;
       esac
-
       BASH

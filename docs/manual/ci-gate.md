@@ -290,3 +290,21 @@ Pointing it at a **real environment** (your own scanners, not the demo seed)?
 Follow the [onboarding runbook](onboarding.md) - per-source `curl`/CI
 snippets, the identifier-correlation helper, and a "no paths?" troubleshooting
 guide.
+
+
+### GitLab CI
+
+You can include the GitLab merge-request gate template in your project's `.gitlab-ci.yml`:
+
+```yaml
+include:
+  - project: 'luiacuaniello/perspectivegraph'
+    ref: main
+    file: '/ci/gitlab/perspectivegraph-gate.yml'
+```
+
+Set `PERSPECTIVEGRAPH_VERSION` to a released PerspectiveGraph version. In server mode, configure `PERSPECTIVEGRAPH_API`, `PERSPECTIVEGRAPH_INGEST`, `PERSPECTIVEGRAPH_TOKEN`, and `PERSPECTIVEGRAPH_HMAC_SECRET` as appropriate for your deployment. Store credentials as masked GitLab CI/CD variables and protect them according to your pipeline's security requirements.
+
+The template runs on merge-request pipelines. Server mode queries a deployed engine; local mode evaluates the supplied estate or reads AWS using the configured region and role. Unknown verdicts fail by default; enable `PERSPECTIVEGRAPH_ALLOW_UNKNOWN` only during a deliberate rollout.
+
+For production use, pin the included template to a reviewed release or commit rather than tracking `main`.
